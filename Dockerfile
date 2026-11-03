@@ -81,6 +81,11 @@ ENV HOME=/home/user
 
 ENV DSH_HOME=/data/.dsh
 
+# Keep the same store when profiles move from the image to a mounted /data.
+ENV PNPM_CONFIG_STORE_DIR=/home/user/.local/share/pnpm/store
+
+ENV PNPM_CONFIG_PACKAGE_IMPORT_METHOD=copy
+
 ENV PUPPETEER_SKIP_DOWNLOAD=true
 
 ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
@@ -97,12 +102,16 @@ ARG DSH_AUXILIARY_VERSION=next
 
 ARG DSH_SYNAPSE_VERSION=next
 
+# MCP SDK needs zod/v3 and zod/v4-mini at the profile root.
 RUN export DSH_HOME=/opt/dsh-home \
     && dsh --profile web --dump-default-config > /dev/null \
-    && dsh plugin --profile web add \
+    && dsh plugin --profile web add --save-exact \
     "@dsh-plugin/dsh-loader@${DSH_LOADER_VERSION}" \
     "@dsh-plugin/dsh-auxiliary@${DSH_AUXILIARY_VERSION}" \
-    "@dsh-plugin/dsh-synapse@${DSH_SYNAPSE_VERSION}"
+    "@dsh-plugin/dsh-synapse@${DSH_SYNAPSE_VERSION}" \
+    zod@3.25.76 \
+    && cd "$DSH_HOME/profiles/web" \
+    && node --input-type=module -e 'await import("zod/v3"); await import("zod/v4-mini"); await import("@modelcontextprotocol/sdk/server/mcp.js");'
 
 WORKDIR /data
 
