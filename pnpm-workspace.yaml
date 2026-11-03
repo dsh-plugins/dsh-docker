@@ -1,0 +1,9 @@
+packages:
+  - .
+
+nodeLinker: hoisted
+autoInstallPeers: false
+
+allowBuilds:
+  better-sqlite3: true
+  puppeteer: false
