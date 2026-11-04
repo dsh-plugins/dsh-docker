@@ -31,7 +31,7 @@ jobs:
           node-version: '24'
           package-manager-cache: false
 
-      - name: Resolve image name and npm next versions
+      - name: Resolve image name and npm versions
         id: versions
         shell: bash
         run: |
@@ -40,32 +40,32 @@ jobs:
           import { appendFileSync } from 'node:fs';
 
           const packages = [
-            ['dsh', '@deepseek-ai/dsh'],
-            ['loader', '@dsh-plugin/dsh-loader'],
-            ['auxiliary', '@dsh-plugin/dsh-auxiliary'],
-            ['synapse', '@dsh-plugin/dsh-synapse'],
+            ['dsh', '@deepseek-ai/dsh', 'alpha'],
+            ['loader', '@dsh-plugin/dsh-loader', 'next'],
+            ['auxiliary', '@dsh-plugin/dsh-auxiliary', 'next'],
+            ['synapse', '@dsh-plugin/dsh-synapse', 'next'],
           ];
-          const versions = await Promise.all(packages.map(async ([key, name]) => {
-            const response = await fetch(`https://registry.npmjs.org/${name}/next`, {
+          const versions = await Promise.all(packages.map(async ([key, name, tag]) => {
+            const response = await fetch(`https://registry.npmjs.org/${name}/${tag}`, {
               signal: AbortSignal.timeout(30_000),
             });
-            if (!response.ok) throw new Error(`${name}@next: HTTP ${response.status}`);
+            if (!response.ok) throw new Error(`${name}@${tag}: HTTP ${response.status}`);
             const metadata = await response.json();
             const { version } = metadata;
             if (metadata.name !== name || typeof version !== 'string'
               || !/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(version)) {
-              throw new Error(`Invalid npm next metadata for ${name}`);
+              throw new Error(`Invalid npm metadata for ${name}@${tag}`);
             }
-            console.log(`${name}@next -> ${version}`);
-            return { key, name, version };
+            console.log(`${name}@${tag} -> ${version}`);
+            return { key, name, tag, version };
           }));
 
           const image = `ghcr.io/${process.env.GITHUB_REPOSITORY.toLowerCase()}`;
           appendFileSync(process.env.GITHUB_OUTPUT, `image=${image}\n`
             + versions.map(({ key, version }) => `${key}=${version}\n`).join(''));
           appendFileSync(process.env.GITHUB_STEP_SUMMARY,
-            `### npm next versions\n\nImage: ${image}\n\n| Package | Version |\n| --- | --- |\n`
-            + versions.map(({ name, version }) => `| ${name} | ${version} |\n`).join(''));
+            `### npm versions\n\nImage: ${image}\n\n| Package | Tag | Version |\n| --- | --- | --- |\n`
+            + versions.map(({ name, tag, version }) => `| ${name} | ${tag} | ${version} |\n`).join(''));
           NODE
 
       - name: Generate image tags and labels
@@ -112,19 +112,46 @@ jobs:
           cache-from: type=gha,scope=dsh-docker-amd64
           cache-to: type=gha,scope=dsh-docker-amd64,mode=max
 
-      - name: Check dependency installation on a data volume
+      - name: Check plugin installation and removal on a data volume
         shell: bash
+        env:
+          EXPECTED_DSH_VERSION: ${{ steps.versions.outputs.dsh }}
         run: |
           set -euo pipefail
           smoke_volume="dsh-smoke-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           docker run --rm --init -i \
+            --env EXPECTED_DSH_VERSION \
             --mount "type=volume,source=${smoke_volume},target=/data" \
             dsh-docker:smoke bash -s <<'SH'
           set -euo pipefail
           zod_version="$(node -p 'require("/opt/dsh-home/profiles/web/node_modules/zod/package.json").version')"
-          /usr/local/bin/docker-entrypoint.sh dsh plugin --profile web add --save-exact --offline "zod@${zod_version}"
+          /usr/local/bin/docker-entrypoint.sh dsh plugin --profile web add --save-exact "zod@${zod_version}"
           cd "$DSH_HOME/profiles/web"
           node --input-type=module -e 'await import("zod/v3"); await import("zod/v4-mini"); await import("@modelcontextprotocol/sdk/server/mcp.js");'
+          export DSH_INSTALL_ROOT="$(npm root -g)/@deepseek-ai/dsh"
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import { readFileSync } from 'node:fs';
+          import { createRequire } from 'node:module';
+          import { join } from 'node:path';
+          import { pathToFileURL } from 'node:url';
+
+          const installAnchor = join(process.env.DSH_INSTALL_ROOT, 'package.json');
+          const require = createRequire(installAnchor);
+          assert.equal(require(installAnchor).version, process.env.EXPECTED_DSH_VERSION);
+          const { runProfilePnpm } = await import(pathToFileURL(
+            require.resolve('@deepseek-ai/dsh-plugin-manager/operations')));
+          const dir = join(process.env.DSH_HOME, 'profiles/web');
+          const name = '@dsh-plugin/dsh-auxiliary';
+          const result = await runProfilePnpm({ profile: 'web', dir, cwd: dir, installAnchor },
+            ['remove', name], {
+              execution: 'service', outputBytes: 1024 * 1024, activateNewBundles: false,
+              onOutput: text => process.stdout.write(text),
+            });
+          assert.equal(result.exitCode, 0, result.output);
+          assert.equal(JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8')).dependencies?.[name], undefined);
+          console.log('Web plugin-manager removal passed');
+          NODE
           SH
 
       - name: Push checked image to GHCR

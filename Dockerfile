@@ -57,7 +57,7 @@ RUN apt-get update \
     && rm /tmp/nodesource-setup.sh \
     && rm -rf /var/lib/apt/lists/*
 
-ARG DSH_VERSION=next
+ARG DSH_VERSION=alpha
 
 RUN npm i -g pnpm@11 "@deepseek-ai/dsh@${DSH_VERSION}"
 
@@ -81,11 +81,6 @@ ENV HOME=/home/user
 
 ENV DSH_HOME=/data/.dsh
 
-# Keep the same store when profiles move from the image to a mounted /data.
-ENV PNPM_CONFIG_STORE_DIR=/home/user/.local/share/pnpm/store
-
-ENV PNPM_CONFIG_PACKAGE_IMPORT_METHOD=copy
-
 ENV PUPPETEER_SKIP_DOWNLOAD=true
 
 ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
@@ -95,6 +90,10 @@ COPY --chmod=755 docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 COPY --chown=user:user pnpm-workspace.yaml /opt/dsh-home/profiles/web/pnpm-workspace.yaml
 
 USER user
+
+# Persist these settings for both CLI and Web plugin-manager operations.
+RUN pnpm config set storeDir /home/user/.local/share/pnpm/store \
+    && pnpm config set packageImportMethod copy
 
 ARG DSH_LOADER_VERSION=next
 
