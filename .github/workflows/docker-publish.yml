@@ -115,7 +115,12 @@ jobs:
               exit 1
             fi
             host="$(docker inspect --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$smoke")"
-            if [[ -n "$host" ]] && docker exec "$smoke" curl -fsS --max-time 2 "http://$host:3080/" >/dev/null 2>&1; then
+            status=000
+            if [[ -n "$host" ]]; then
+              status="$(docker exec "$smoke" curl -sS --max-time 2 -o /dev/null -w '%{http_code}' "http://$host:3080/" 2>/dev/null)" || status=000
+            fi
+            # The default Web profile refuses anonymous requests with HTTP 401.
+            if [[ "$status" == 401 || "$status" == 200 ]]; then
               ready=true
               break
             fi
