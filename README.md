@@ -1,6 +1,6 @@
 # dsh-docker
 
-预装 DSH 和 dsh-loader、dsh-auxiliary、dsh-synapse，以 UID/GID `1000:1000` 的 `user` 用户运行 Web 服务。
+预装 DSH，不预装任何插件。Web 服务以 UID/GID `1000:1000` 的 `user` 用户运行。
 
 在此目录构建并启动：
 
@@ -12,7 +12,7 @@ docker logs dsh
 
 打开日志中带有登录 token 的 `http://localhost:3080` 地址。默认端口为 `3080`；启动脚本自动绑定容器的具体 IPv4 地址，也可用 `DSH_HOST` 指定容器内的具体 IP。
 
-`DSH_HOME=/data/.dsh`，配置、会话及插件随 `dsh-data` 数据卷保存。首次启动会从镜像模板初始化插件，之后保留已有 profile 和配置。构建新镜像不会覆盖旧数据卷中的插件。
+`DSH_HOME=/data/.dsh`，配置、会话及插件随 `dsh-data` 数据卷保存。新数据卷只会初始化 Web profile 的 pnpm 配置，不会安装任何插件。更新镜像不会覆盖或删除旧数据卷中的插件、会话和配置。
 
 pnpm 在构建和运行时均使用 `/home/user/.local/share/pnpm/store`，并以复制方式安装文件，避免 `/data` 位于另一挂载卷时自动切换仓库而出现 `ERR_PNPM_UNEXPECTED_STORE`。这些设置写入 `user` 用户的 pnpm 全局配置，供命令行与 Web 插件管理器持续使用。
 
@@ -33,8 +33,6 @@ SH
 ```
 
 此命令读取 pnpm 11 安装记录中的原仓库路径，并将其及复制模式保存到数据卷内的 `pnpm-workspace.yaml`；之后可直接在 Web 页面重试卸载。路径中的 `.local` 或 `local` 以实际安装记录为准，版本子目录 `/v11` 会自动去掉。操作保留插件、配置与会话；给某次安装单独传入 `--store-dir` 不会保存此设置。
-
-镜像在 profile 中固定安装 `zod@3.25.76`，提供 MCP SDK 需要的 `zod/v3` 和 `zod/v4-mini`，并在构建时验证这些路径与 MCP Server 模块可以导入。
 
 若旧数据卷出现包含 `zod/v3` 的 `ERR_PACKAGE_PATH_NOT_EXPORTED`，请更新该卷的依赖并重启（`dsh` 替换为实际容器名）：
 
@@ -80,29 +78,17 @@ proxy_read_timeout 3600s;
 
 ## 自动构建与发布
 
-推送分支或 Git 标签，以及在 GitHub Actions 中手动运行 `Build and publish Docker image`，都会构建 Linux amd64 镜像并推送至 `ghcr.io/<owner>/<repo>`（仓库路径自动转为小写）。工作流通过内置 `GITHUB_TOKEN` 登录，并声明 `packages: write` 权限，无需额外配置发布密钥。
+默认分支的 GitHub Actions 每小时第 17 分钟检查一次（UTC）。从 npm 官方仓库读取 `@deepseek-ai/dsh` 的 `alpha`、`next` 和 `latest`，按 [SemVer](https://semver.org/lang/zh-CN/) 选最高版本。版本和 Dockerfile 当前值相同或更低时，不构建也不发布；任一标签无效或无法读取时，检查失败且不会写入 Dockerfile。
 
-发布前会挂载新的 Docker 数据卷，验证 profile 初始化、依赖安装、MCP 模块导入，以及通过 Web 插件管理器使用的 `service` 执行路径卸载插件；同时检查 DSH 实际安装版本与解析结果一致。检查通过后才推送已检查的镜像。安装和卸载检查允许访问 npm，供 pnpm 获取校验锁文件所需的仓库元数据；镜像内已有依赖文件不代表离线元数据缓存齐全。
+有新版本时，工作流用该确切版本构建 Linux amd64 镜像，验证安装版本和新数据卷没有预装插件，才推送至 `ghcr.io/<owner>/<repo>`。发布成功后，`github-actions[bot]` 提交 `[skip ci]`，只改 Dockerfile 中的 `DSH_VERSION`。如果发布失败，不改版本号，下一次检查会重试。
 
-每次运行都从 npm 官方 registry 解析以下标签，将确切版本传入 Docker 构建，并在 Actions 摘要中记录标签与版本。版本变化会使相关安装层的缓存失效。
-
-| 包 | npm 标签 |
+| 镜像标签 | 示例与含义 |
 | --- | --- |
-| `@deepseek-ai/dsh` | `alpha` |
-| `@dsh-plugin/dsh-loader` | `next` |
-| `@dsh-plugin/dsh-auxiliary` | `next` |
-| `@dsh-plugin/dsh-synapse` | `next` |
+| DSH 精确版本 | `0.2.3-alpha.2`。若版本含构建元数据，Docker 标签用 `_` 代替 `+`；镜像标签元数据仍记录原版本。 |
+| `latest`、`next` | 指向同一最新成功发布的镜像；不是 npm 的同名标签。 |
 
-npm 标签是发布者指定的版本别名，不按版本号或发布时间自动排序。例如 `next` 可能仍指向 `0.2.1-rc.5`，而 `alpha` 已指向 `0.2.2-alpha.3`。镜像上的 `next`、`latest` 是本仓库的镜像标签，与 npm 包标签独立。
+```sh
+docker pull ghcr.io/dsh-plugins/dsh-docker:0.2.3-alpha.2
+```
 
-镜像标签如下：
-
-| 标签 | 更新时机 |
-| --- | --- |
-| `next`、`latest` | 默认分支的 push 或手动构建 |
-| `branch-<分支名>` | 对应分支构建，特殊字符由工作流规范化 |
-| `tag-<Git 标签>` | 对应 Git 标签构建 |
-| `sha-<短提交哈希>` | 每次构建，同一提交重新构建时更新 |
-| `build-<run_id>-<run_attempt>` | 每次运行及重试的独立镜像 |
-
-本地构建时，`DSH_VERSION` 默认为 `alpha`，三个插件的版本参数默认为 `next`；上面的 `--no-cache` 确保重新解析标签。也可通过 `--build-arg DSH_VERSION=...`、`DSH_LOADER_VERSION`、`DSH_AUXILIARY_VERSION`、`DSH_SYNAPSE_VERSION` 指定确切版本。
+可在 Actions 手动执行检查；仅在首次发布或确需重建当前版本时勾选 `bootstrap`。普通推送不会发布镜像。本地构建默认使用 Dockerfile 固定的版本；也可通过 `--build-arg DSH_VERSION=...` 指定其他确切版本。

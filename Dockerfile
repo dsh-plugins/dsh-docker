@@ -57,15 +57,14 @@ RUN apt-get update \
     && rm /tmp/nodesource-setup.sh \
     && rm -rf /var/lib/apt/lists/*
 
-ARG DSH_VERSION=alpha
+ARG DSH_VERSION=0.2.3-alpha.2
 
 RUN npm i -g pnpm@11 "@deepseek-ai/dsh@${DSH_VERSION}"
 
 RUN groupadd -g 1000 user \
     && useradd -u 1000 -g 1000 -m user \
-    && mkdir -p /data /opt/dsh-home/profiles/web \
-    && chown user:user /data \
-    && chown -R user:user /opt/dsh-home
+    && mkdir -p /data \
+    && chown user:user /data
 
 RUN sed -i 's/# en_US.UTF-8 UTF-8/en_US.UTF-8 UTF-8/' /etc/locale.gen
 
@@ -87,30 +86,13 @@ ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
 
 COPY --chmod=755 docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 
-COPY --chown=user:user pnpm-workspace.yaml /opt/dsh-home/profiles/web/pnpm-workspace.yaml
+COPY pnpm-workspace.yaml /opt/dsh-defaults/pnpm-workspace.yaml
 
 USER user
 
 # Persist these settings for both CLI and Web plugin-manager operations.
 RUN pnpm config set storeDir /home/user/.local/share/pnpm/store \
     && pnpm config set packageImportMethod copy
-
-ARG DSH_LOADER_VERSION=next
-
-ARG DSH_AUXILIARY_VERSION=next
-
-ARG DSH_SYNAPSE_VERSION=next
-
-# MCP SDK needs zod/v3 and zod/v4-mini at the profile root.
-RUN export DSH_HOME=/opt/dsh-home \
-    && dsh --profile web --dump-default-config > /dev/null \
-    && dsh plugin --profile web add --save-exact \
-    "@dsh-plugin/dsh-loader@${DSH_LOADER_VERSION}" \
-    "@dsh-plugin/dsh-auxiliary@${DSH_AUXILIARY_VERSION}" \
-    "@dsh-plugin/dsh-synapse@${DSH_SYNAPSE_VERSION}" \
-    zod@3.25.76 \
-    && cd "$DSH_HOME/profiles/web" \
-    && node --input-type=module -e 'await import("zod/v3"); await import("zod/v4-mini"); await import("@modelcontextprotocol/sdk/server/mcp.js");'
 
 WORKDIR /data
 

@@ -1,18 +1,52 @@
 name: Build and publish Docker image
 
 on:
-  push:
+  schedule:
+    - cron: '17 * * * *'
   workflow_dispatch:
+    inputs:
+      bootstrap:
+        description: Publish the pinned version even when no higher version exists
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
 concurrency:
-  group: ghcr-${{ github.workflow }}-${{ github.ref }}
+  group: dsh-docker-publish
   cancel-in-progress: false
 
 jobs:
+  resolve:
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      build: ${{ steps.version.outputs.build }}
+      newer: ${{ steps.version.outputs.newer }}
+      image: ${{ steps.version.outputs.image }}
+      pin: ${{ steps.version.outputs.pin }}
+      tag: ${{ steps.version.outputs.tag }}
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6.4.0
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - run: node --test .github/scripts/dsh-version.test.mjs
+      - name: Compare the pinned DSH version to the three npm tags
+        id: version
+        env:
+          BOOTSTRAP: ${{ inputs.bootstrap }}
+        run: node .github/scripts/dsh-version.mjs resolve
+
   publish:
+    needs: resolve
+    if: needs.resolve.outputs.build == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     permissions:
@@ -20,67 +54,21 @@ jobs:
       packages: write
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v6
+      - uses: actions/checkout@v6
         with:
           persist-credentials: false
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v6.4.0
-        with:
-          node-version: '24'
-          package-manager-cache: false
-
-      - name: Resolve image name and npm versions
-        id: versions
-        shell: bash
-        run: |
-          set -euo pipefail
-          node --input-type=module <<'NODE'
-          import { appendFileSync } from 'node:fs';
-
-          const packages = [
-            ['dsh', '@deepseek-ai/dsh', 'alpha'],
-            ['loader', '@dsh-plugin/dsh-loader', 'next'],
-            ['auxiliary', '@dsh-plugin/dsh-auxiliary', 'next'],
-            ['synapse', '@dsh-plugin/dsh-synapse', 'next'],
-          ];
-          const versions = await Promise.all(packages.map(async ([key, name, tag]) => {
-            const response = await fetch(`https://registry.npmjs.org/${name}/${tag}`, {
-              signal: AbortSignal.timeout(30_000),
-            });
-            if (!response.ok) throw new Error(`${name}@${tag}: HTTP ${response.status}`);
-            const metadata = await response.json();
-            const { version } = metadata;
-            if (metadata.name !== name || typeof version !== 'string'
-              || !/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(version)) {
-              throw new Error(`Invalid npm metadata for ${name}@${tag}`);
-            }
-            console.log(`${name}@${tag} -> ${version}`);
-            return { key, name, tag, version };
-          }));
-
-          const image = `ghcr.io/${process.env.GITHUB_REPOSITORY.toLowerCase()}`;
-          appendFileSync(process.env.GITHUB_OUTPUT, `image=${image}\n`
-            + versions.map(({ key, version }) => `${key}=${version}\n`).join(''));
-          appendFileSync(process.env.GITHUB_STEP_SUMMARY,
-            `### npm versions\n\nImage: ${image}\n\n| Package | Tag | Version |\n| --- | --- | --- |\n`
-            + versions.map(({ name, tag, version }) => `| ${name} | ${tag} | ${version} |\n`).join(''));
-          NODE
-
       - name: Generate image tags and labels
         id: meta
         uses: docker/metadata-action@v6
         with:
-          images: ${{ steps.versions.outputs.image }}
+          images: ${{ needs.resolve.outputs.image }}
           flavor: latest=false
           tags: |
-            type=raw,value=next,enable={{is_default_branch}}
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=ref,event=branch,prefix=branch-
-            type=ref,event=tag,prefix=tag-
-            type=sha
-            type=raw,value=build-${{ github.run_id }}-${{ github.run_attempt }}
+            type=raw,value=${{ needs.resolve.outputs.tag }},priority=1000
+            type=raw,value=latest
+            type=raw,value=next
+          labels: |
+            org.opencontainers.image.version=${{ needs.resolve.outputs.version }}
 
       - name: Log in to GHCR
         uses: docker/login-action@v4
@@ -104,54 +92,38 @@ jobs:
             dsh-docker:smoke
             ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          build-args: |
-            DSH_VERSION=${{ steps.versions.outputs.dsh }}
-            DSH_LOADER_VERSION=${{ steps.versions.outputs.loader }}
-            DSH_AUXILIARY_VERSION=${{ steps.versions.outputs.auxiliary }}
-            DSH_SYNAPSE_VERSION=${{ steps.versions.outputs.synapse }}
+          build-args: DSH_VERSION=${{ needs.resolve.outputs.version }}
           cache-from: type=gha,scope=dsh-docker-amd64
           cache-to: type=gha,scope=dsh-docker-amd64,mode=max
 
-      - name: Check plugin installation and removal on a data volume
+      - name: Check the exact version and plugin-free profile on a new data volume
         shell: bash
         env:
-          EXPECTED_DSH_VERSION: ${{ steps.versions.outputs.dsh }}
+          EXPECTED_DSH_VERSION: ${{ needs.resolve.outputs.version }}
         run: |
           set -euo pipefail
           smoke_volume="dsh-smoke-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          trap 'docker volume rm "$smoke_volume" >/dev/null 2>&1 || true' EXIT
           docker run --rm --init -i \
             --env EXPECTED_DSH_VERSION \
             --mount "type=volume,source=${smoke_volume},target=/data" \
             dsh-docker:smoke bash -s <<'SH'
           set -euo pipefail
-          zod_version="$(node -p 'require("/opt/dsh-home/profiles/web/node_modules/zod/package.json").version')"
-          /usr/local/bin/docker-entrypoint.sh dsh plugin --profile web add --save-exact "zod@${zod_version}"
-          cd "$DSH_HOME/profiles/web"
-          node --input-type=module -e 'await import("zod/v3"); await import("zod/v4-mini"); await import("@modelcontextprotocol/sdk/server/mcp.js");'
-          export DSH_INSTALL_ROOT="$(npm root -g)/@deepseek-ai/dsh"
-          node --input-type=module <<'NODE'
-          import assert from 'node:assert/strict';
-          import { readFileSync } from 'node:fs';
-          import { createRequire } from 'node:module';
-          import { join } from 'node:path';
-          import { pathToFileURL } from 'node:url';
-
-          const installAnchor = join(process.env.DSH_INSTALL_ROOT, 'package.json');
-          const require = createRequire(installAnchor);
-          assert.equal(require(installAnchor).version, process.env.EXPECTED_DSH_VERSION);
-          const { runProfilePnpm } = await import(pathToFileURL(
-            require.resolve('@deepseek-ai/dsh-plugin-manager/operations')));
-          const dir = join(process.env.DSH_HOME, 'profiles/web');
-          const name = '@dsh-plugin/dsh-auxiliary';
-          const result = await runProfilePnpm({ profile: 'web', dir, cwd: dir, installAnchor },
-            ['remove', name], {
-              execution: 'service', outputBytes: 1024 * 1024, activateNewBundles: false,
-              onOutput: text => process.stdout.write(text),
-            });
-          assert.equal(result.exitCode, 0, result.output);
-          assert.equal(JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8')).dependencies?.[name], undefined);
-          console.log('Web plugin-manager removal passed');
-          NODE
+          node -e 'const assert = require("node:assert/strict"); assert.equal(require(process.argv[1]).version, process.env.EXPECTED_DSH_VERSION)' "$(npm root -g)/@deepseek-ai/dsh/package.json"
+          entrypoint=/usr/local/bin/docker-entrypoint.sh
+          "$entrypoint" dsh --profile web --dump-default-config >/dev/null
+          profile="$DSH_HOME/profiles/web"
+          test -f "$profile/pnpm-workspace.yaml"
+          test ! -e "$profile/node_modules"
+          node -e 'const fs = require("node:fs"); const p = process.argv[1]; if (fs.existsSync(p)) require("node:assert/strict").deepEqual(JSON.parse(fs.readFileSync(p)).dependencies ?? {}, {})' "$profile/package.json"
+          # Simulate config and a dependency from an older user volume without installing it.
+          printf '{"dependencies":{"example-existing-plugin":"1.0.0"}}\n' > "$profile/package.json"
+          printf '# user setting\n' >> "$profile/pnpm-workspace.yaml"
+          cp "$profile/package.json" /tmp/profile-before.json
+          cp "$profile/pnpm-workspace.yaml" /tmp/workspace-before.yaml
+          "$entrypoint" dsh --profile web --dump-default-config >/dev/null
+          cmp /tmp/profile-before.json "$profile/package.json"
+          cmp /tmp/workspace-before.yaml "$profile/pnpm-workspace.yaml"
           SH
 
       - name: Push checked image to GHCR
@@ -166,12 +138,30 @@ jobs:
             fi
           done <<< "$IMAGE_TAGS"
 
-      - name: Remove smoke-test volume
-        if: always()
+  bump-dockerfile:
+    needs: [resolve, publish]
+    if: needs.resolve.outputs.newer == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.ref_name }}
+      - uses: actions/setup-node@v6.4.0
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: Record the published version
         shell: bash
+        env:
+          EXPECTED_PIN: ${{ needs.resolve.outputs.pin }}
+          DSH_VERSION: ${{ needs.resolve.outputs.version }}
         run: |
           set -euo pipefail
-          smoke_volume="dsh-smoke-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          if docker volume inspect "$smoke_volume" > /dev/null 2>&1; then
-            docker volume rm "$smoke_volume"
-          fi
+          node .github/scripts/dsh-version.mjs bump "$EXPECTED_PIN" "$DSH_VERSION"
+          git -c user.name='github-actions[bot]' \
+            -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+            commit -m "chore: bump DSH to $DSH_VERSION [skip ci]" -- Dockerfile
+          git push origin "HEAD:${GITHUB_REF}"

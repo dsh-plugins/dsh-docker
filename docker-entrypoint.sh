@@ -4,11 +4,11 @@ set -euo pipefail
 export DSH_HOME="${DSH_HOME:-/data/.dsh}"
 
 if [[ "${1:-}" == dsh ]]; then
-    mkdir -p "$DSH_HOME"
-    if [[ ! -f "$DSH_HOME/profiles/web/package.json" ]]; then
-        cp -a -n /opt/dsh-home/. "$DSH_HOME/"
-    fi
     profile_dir="$DSH_HOME/profiles/web"
+    mkdir -p "$profile_dir"
+    if [[ ! -f "$profile_dir/package.json" && ! -f "$profile_dir/pnpm-workspace.yaml" ]]; then
+        cp -n /opt/dsh-defaults/pnpm-workspace.yaml "$profile_dir/pnpm-workspace.yaml"
+    fi
     if [[ -f "$profile_dir/node_modules/.modules.yaml" ]]; then
         # pnpm 11 writes JSON here; keep the store recorded by the existing install.
         store_dir="$(node -p 'require("node:path").dirname(JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8")).storeDir)' "$profile_dir/node_modules/.modules.yaml")"
