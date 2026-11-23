@@ -102,28 +102,46 @@ jobs:
           EXPECTED_DSH_VERSION: ${{ needs.resolve.outputs.version }}
         run: |
           set -euo pipefail
-          smoke_volume="dsh-smoke-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          trap 'docker volume rm "$smoke_volume" >/dev/null 2>&1 || true' EXIT
-          docker run --rm --init -i \
+          smoke="dsh-smoke-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          trap 'docker rm -f "$smoke" >/dev/null 2>&1 || true; docker volume rm "$smoke" >/dev/null 2>&1 || true' EXIT
+          docker run --detach --init --name "$smoke" \
             --env EXPECTED_DSH_VERSION \
-            --mount "type=volume,source=${smoke_volume},target=/data" \
-            dsh-docker:smoke bash -s <<'SH'
+            --mount "type=volume,source=${smoke},target=/data" \
+            dsh-docker:smoke >/dev/null
+          ready=false
+          for ((attempt = 0; attempt < 45; attempt++)); do
+            if [[ "$(docker inspect --format '{{.State.Running}}' "$smoke")" != true ]]; then
+              echo "Default Web server exited: $(docker inspect --format '{{.State.ExitCode}}' "$smoke")" >&2
+              exit 1
+            fi
+            host="$(docker inspect --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$smoke")"
+            if [[ -n "$host" ]] && docker exec "$smoke" curl -fsS --max-time 2 "http://$host:3080/" >/dev/null 2>&1; then
+              ready=true
+              break
+            fi
+            sleep 2
+          done
+          test "$ready" = true || { echo 'Default Web server did not respond on port 3080' >&2; exit 1; }
+          echo 'Default Web server responded on port 3080'
+          docker exec -i "$smoke" bash -s <<'SH'
           set -euo pipefail
           node -e 'const assert = require("node:assert/strict"); assert.equal(require(process.argv[1]).version, process.env.EXPECTED_DSH_VERSION)' "$(npm root -g)/@deepseek-ai/dsh/package.json"
-          entrypoint=/usr/local/bin/docker-entrypoint.sh
-          "$entrypoint" dsh --profile web --dump-default-config >/dev/null
           profile="$DSH_HOME/profiles/web"
           test -f "$profile/pnpm-workspace.yaml"
           test ! -e "$profile/node_modules"
           node -e 'const fs = require("node:fs"); const p = process.argv[1]; if (fs.existsSync(p)) require("node:assert/strict").deepEqual(JSON.parse(fs.readFileSync(p)).dependencies ?? {}, {})' "$profile/package.json"
-          # Simulate config and a dependency from an older user volume without installing it.
+          # Run the same entrypoint on an isolated fixture for an existing data volume.
+          export DSH_HOME=/data/legacy-check
+          profile="$DSH_HOME/profiles/web"
+          mkdir -p "$profile"
           printf '{"dependencies":{"example-existing-plugin":"1.0.0"}}\n' > "$profile/package.json"
-          printf '# user setting\n' >> "$profile/pnpm-workspace.yaml"
+          printf '# user setting\n' > "$profile/pnpm-workspace.yaml"
           cp "$profile/package.json" /tmp/profile-before.json
           cp "$profile/pnpm-workspace.yaml" /tmp/workspace-before.yaml
-          "$entrypoint" dsh --profile web --dump-default-config >/dev/null
+          /usr/local/bin/docker-entrypoint.sh dsh --version >/dev/null
           cmp /tmp/profile-before.json "$profile/package.json"
           cmp /tmp/workspace-before.yaml "$profile/pnpm-workspace.yaml"
+          echo 'Exact DSH version, clean profile, and existing profile preservation verified'
           SH
 
       - name: Push checked image to GHCR
