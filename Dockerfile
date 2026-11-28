@@ -57,7 +57,7 @@ RUN apt-get update \
     && rm /tmp/nodesource-setup.sh \
     && rm -rf /var/lib/apt/lists/*
 
-ARG DSH_VERSION=0.2.3-alpha.2
+ARG DSH_VERSION=0.2.3-alpha.3
 
 RUN npm i -g pnpm@11 "@deepseek-ai/dsh@${DSH_VERSION}"
 
